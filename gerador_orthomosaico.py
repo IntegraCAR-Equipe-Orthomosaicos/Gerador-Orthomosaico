@@ -218,47 +218,73 @@ class GeradorOrthomosaico:
                 return False, local_path
         
         def download_image_bands(row):
-            """Download de todas as bandas de uma imagem"""
-            image_id = row.name
-            success_count = 0
-            
-            # Criar diretório da imagem
-            image_dir = os.path.join(self.dir_imagens, f"CBERS_4A_WPM_{image_id}")
-            
-            bands = ['red', 'green', 'blue']
-            band_numbers = ['BAND3', 'BAND2', 'BAND1']  # CBERS-4A WPM mapping
-            
-            futures = []
-            with ThreadPoolExecutor(max_workers=3) as band_executor:  # 3 threads por imagem
-                for band, band_num in zip(bands, band_numbers):
-                    if band in row and pd.notna(row[band]):
-                        url = row[band]
-                        filename = f"{os.path.basename(urlparse(url).path)}"
-                        local_path = os.path.join(image_dir, filename)
-                        
-                        future = band_executor.submit(download_single_file, url, local_path)
-                        futures.append(future)
-                        
-                        with download_stats['lock']:
-                            download_stats['total_files'] += 1
+            """Download de todas as bandas de uma imagem usando CBERS-4A API"""
+            try:
+                # Usar a API original do CBERS-4A para download
+                image_gdf = gpd.GeoDataFrame([row], crs=self.es_mosaic.crs)
                 
-                # Aguardar conclusão das bandas
-                for future in as_completed(futures):
-                    success, path = future.result()
-                    if success:
-                        success_count += 1
-            
-            return success_count > 0, image_id
+                print(f"📥 Baixando imagem: {row.get('scene_id', 'unknown')}")
+                
+                # Download usando API original (mais confiável)
+                self.api.download(
+                    image_gdf, 
+                    bands=['red', 'green', 'blue'], 
+                    outdir=self.dir_imagens, 
+                    with_folder=True
+                )
+                
+                # Verificar se arquivos foram baixados
+                scene_id = row.get('scene_id', '')
+                possible_dirs = glob(f"{self.dir_imagens}/*{scene_id}*") or glob(f"{self.dir_imagens}/*")
+                
+                if possible_dirs:
+                    # Contar arquivos .tif baixados
+                    total_files = 0
+                    for dir_path in possible_dirs:
+                        tif_files = glob(f"{dir_path}/*.tif")
+                        total_files += len(tif_files)
+                    
+                    if total_files >= 3:  # RGB completo
+                        with download_stats['lock']:
+                            download_stats['completed_files'] += total_files
+                            download_stats['total_files'] += total_files
+                            
+                            # Estimar tamanho dos arquivos
+                            for dir_path in possible_dirs:
+                                for tif_file in glob(f"{dir_path}/*.tif"):
+                                    if os.path.exists(tif_file):
+                                        download_stats['total_bytes'] += os.path.getsize(tif_file)
+                            
+                            # Mostrar progresso
+                            if download_stats['completed_files'] % 3 == 0:
+                                elapsed = time.time() - download_stats['start_time']
+                                rate_mbps = (download_stats['total_bytes'] / 1024 / 1024) / elapsed if elapsed > 0 else 0
+                                completed_images = download_stats['completed_files'] // 3
+                                total_images = len(self.es_mosaic)
+                                progress = (completed_images / total_images) * 100
+                                print(f"📊 Progresso: {completed_images}/{total_images} "
+                                      f"({progress:.1f}%) | Taxa: {rate_mbps:.2f} MB/s")
+                        
+                        return True, row.get('scene_id', 'unknown')
+                
+                return False, row.get('scene_id', 'unknown')
+                
+            except Exception as e:
+                print(f"❌ Erro ao baixar imagem {row.get('scene_id', 'unknown')}: {e}")
+                return False, row.get('scene_id', 'unknown')
         
-        # Download paralelo das imagens (5 imagens simultâneas)
+        # Download paralelo das imagens (3 imagens simultâneas - mais conservador)
         start_time = time.time()
         successful_downloads = 0
         failed_downloads = 0
         
-        print(f"🚀 Usando 5 threads para download simultâneo de imagens...")
-        print(f"📡 Cada imagem usa 3 threads para baixar RGB em paralelo")
+        # Inicializar contadores
+        download_stats['total_files'] = len(self.es_mosaic) * 3  # Estimativa: 3 arquivos por imagem
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        print(f"🚀 Usando 3 threads para download simultâneo de imagens...")
+        print(f"📡 Usando API original CBERS-4A (mais estável)")
+        
+        with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_row = {
                 executor.submit(download_image_bands, row): idx 
                 for idx, row in self.es_mosaic.iterrows()
@@ -288,7 +314,30 @@ class GeradorOrthomosaico:
         print(f"🚀 Taxa média: {avg_rate:.2f} MB/s")
         print(f"="*60)
         
-        if avg_rate < 1.0:
+        if successful_downloads == 0:
+            print("⚠️ Nenhuma imagem foi baixada com sucesso!")
+            print("💡 Possíveis causas:")
+            print("   - Problema de conectividade com servidores do INPE")
+            print("   - URLs das imagens podem estar indisponíveis")
+            print("   - Credenciais ou permissões da API")
+            print("   - Servidores do INPE temporariamente indisponíveis")
+            print("\n🔄 Tentativa de fallback para download sequencial...")
+            
+            # Fallback: tentar download sequencial tradicional
+            try:
+                print("📥 Usando método de download original da API...")
+                self.api.download(
+                    self.es_mosaic, 
+                    bands=['red', 'green', 'blue'], 
+                    outdir=self.dir_imagens, 
+                    with_folder=True
+                )
+                print("✅ Download sequencial concluído com sucesso!")
+            except Exception as e:
+                print(f"❌ Falha também no download sequencial: {e}")
+                print("💡 Verifique sua conexão e tente novamente mais tarde")
+                
+        elif avg_rate < 1.0 and successful_downloads > 0:
             print("⚠️ Taxa de download baixa detectada!")
             print("💡 Possíveis causas:")
             print("   - Limitação dos servidores do INPE")
