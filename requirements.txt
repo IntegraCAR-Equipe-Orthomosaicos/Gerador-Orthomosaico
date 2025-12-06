@@ -1,0 +1,6 @@
+geopandas==1.1.1
+cbers4asat==0.10.0
+matplotlib==3.10.7
+rasterio==1.4.3
+geomet==1.1.0
+geojson==3.2.0
