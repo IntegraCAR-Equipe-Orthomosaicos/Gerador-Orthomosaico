@@ -16,6 +16,11 @@ import traceback
 from datetime import date
 from glob import glob
 from os.path import basename
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from urllib.parse import urlparse
 
 import geopandas as gpd
 import pandas as pd
@@ -158,19 +163,142 @@ class GeradorOrthomosaico:
         return self.es_mosaic
 
     def fazer_download(self):
-        """Fazer download das imagens"""
-        print(f"\n💾 Iniciando download de {len(self.es_mosaic)} imagens...")
+        """Fazer download das imagens em paralelo com monitoramento de taxa"""
+        import time
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests
+        from urllib.parse import urlparse
         
-        self.api.download(
-            self.es_mosaic, 
-            bands=['red', 'green', 'blue'], 
-            outdir=self.dir_imagens, 
-            with_folder=True
-        )
+        print(f"\n💾 Iniciando download paralelo de {len(self.es_mosaic)} imagens...")
+        
+        # Estatísticas de download
+        download_stats = {
+            'total_files': 0,
+            'completed_files': 0,
+            'total_bytes': 0,
+            'start_time': time.time(),
+            'lock': threading.Lock()
+        }
+        
+        def download_single_file(url, local_path):
+            """Download de um único arquivo com monitoramento"""
+            try:
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                
+                file_size = int(response.headers.get('content-length', 0))
+                
+                with open(local_path, 'wb') as f:
+                    downloaded = 0
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                
+                # Atualizar estatísticas
+                with download_stats['lock']:
+                    download_stats['completed_files'] += 1
+                    download_stats['total_bytes'] += downloaded
+                    
+                    # Mostrar progresso a cada 5 arquivos
+                    if download_stats['completed_files'] % 5 == 0:
+                        elapsed = time.time() - download_stats['start_time']
+                        rate_mbps = (download_stats['total_bytes'] / 1024 / 1024) / elapsed if elapsed > 0 else 0
+                        progress = (download_stats['completed_files'] / download_stats['total_files']) * 100
+                        print(f"📊 Progresso: {download_stats['completed_files']}/{download_stats['total_files']} "
+                              f"({progress:.1f}%) | Taxa: {rate_mbps:.2f} MB/s")
+                
+                return True, local_path
+                
+            except Exception as e:
+                print(f"❌ Erro ao baixar {url}: {e}")
+                return False, local_path
+        
+        def download_image_bands(row):
+            """Download de todas as bandas de uma imagem"""
+            image_id = row.name
+            success_count = 0
+            
+            # Criar diretório da imagem
+            image_dir = os.path.join(self.dir_imagens, f"CBERS_4A_WPM_{image_id}")
+            
+            bands = ['red', 'green', 'blue']
+            band_numbers = ['BAND3', 'BAND2', 'BAND1']  # CBERS-4A WPM mapping
+            
+            futures = []
+            with ThreadPoolExecutor(max_workers=3) as band_executor:  # 3 threads por imagem
+                for band, band_num in zip(bands, band_numbers):
+                    if band in row and pd.notna(row[band]):
+                        url = row[band]
+                        filename = f"{os.path.basename(urlparse(url).path)}"
+                        local_path = os.path.join(image_dir, filename)
+                        
+                        future = band_executor.submit(download_single_file, url, local_path)
+                        futures.append(future)
+                        
+                        with download_stats['lock']:
+                            download_stats['total_files'] += 1
+                
+                # Aguardar conclusão das bandas
+                for future in as_completed(futures):
+                    success, path = future.result()
+                    if success:
+                        success_count += 1
+            
+            return success_count > 0, image_id
+        
+        # Download paralelo das imagens (5 imagens simultâneas)
+        start_time = time.time()
+        successful_downloads = 0
+        failed_downloads = 0
+        
+        print(f"🚀 Usando 5 threads para download simultâneo de imagens...")
+        print(f"📡 Cada imagem usa 3 threads para baixar RGB em paralelo")
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_row = {
+                executor.submit(download_image_bands, row): idx 
+                for idx, row in self.es_mosaic.iterrows()
+            }
+            
+            for future in as_completed(future_to_row):
+                success, image_id = future.result()
+                if success:
+                    successful_downloads += 1
+                else:
+                    failed_downloads += 1
+        
+        # Estatísticas finais
+        end_time = time.time()
+        total_time = end_time - start_time
+        total_mb = download_stats['total_bytes'] / 1024 / 1024
+        avg_rate = total_mb / total_time if total_time > 0 else 0
+        
+        print(f"\n" + "="*60)
+        print(f"📊 ESTATÍSTICAS DE DOWNLOAD")
+        print(f"="*60)
+        print(f"✅ Imagens baixadas com sucesso: {successful_downloads}")
+        print(f"❌ Imagens com falha: {failed_downloads}")
+        print(f"📁 Arquivos totais baixados: {download_stats['completed_files']}")
+        print(f"💾 Volume total: {total_mb:.2f} MB")
+        print(f"⏱️ Tempo total: {total_time:.1f}s")
+        print(f"🚀 Taxa média: {avg_rate:.2f} MB/s")
+        print(f"="*60)
+        
+        if avg_rate < 1.0:
+            print("⚠️ Taxa de download baixa detectada!")
+            print("💡 Possíveis causas:")
+            print("   - Limitação dos servidores do INPE")
+            print("   - Conexão de internet lenta")
+            print("   - Alto tráfego nos servidores")
+            print("   - Imagens muito grandes")
         
         # Verificar download
         imagens_dirs = glob(f"{self.dir_imagens}/*")
-        print(f"✅ Download concluído: {len(imagens_dirs)} diretórios criados")
+        print(f"\n📁 Diretórios criados: {len(imagens_dirs)}")
         
         return imagens_dirs
 
