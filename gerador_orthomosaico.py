@@ -223,7 +223,7 @@ class GeradorOrthomosaico:
                 # Usar a API original do CBERS-4A para download
                 image_gdf = gpd.GeoDataFrame([row], crs=self.es_mosaic.crs)
                 
-                print(f"📥 Baixando imagem: {row.get('scene_id', 'unknown')}")
+                print(f"📥 Baixando imagem: {row.get('id', 'unknown')}")
                 
                 # Download usando API original (mais confiável)
                 self.api.download(
@@ -234,7 +234,7 @@ class GeradorOrthomosaico:
                 )
                 
                 # Verificar se arquivos foram baixados
-                scene_id = row.get('scene_id', '')
+                scene_id = row.get('id', '')
                 possible_dirs = glob(f"{self.dir_imagens}/*{scene_id}*") or glob(f"{self.dir_imagens}/*")
                 
                 if possible_dirs:
@@ -265,13 +265,13 @@ class GeradorOrthomosaico:
                                 print(f"📊 Progresso: {completed_images}/{total_images} "
                                       f"({progress:.1f}%) | Taxa: {rate_mbps:.2f} MB/s")
                         
-                        return True, row.get('scene_id', 'unknown')
+                        return True, row.get('id', 'unknown')
                 
-                return False, row.get('scene_id', 'unknown')
+                return False, row.get('id', 'unknown')
                 
             except Exception as e:
-                print(f"❌ Erro ao baixar imagem {row.get('scene_id', 'unknown')}: {e}")
-                return False, row.get('scene_id', 'unknown')
+                print(f"❌ Erro ao baixar imagem {row.get('id', 'unknown')}: {e}")
+                return False, row.get('id', 'unknown')
         
         # Download paralelo das imagens (3 imagens simultâneas - mais conservador)
         start_time = time.time()
