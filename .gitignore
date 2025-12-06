@@ -262,12 +262,3 @@ tests/output/
 # Personal configuration
 config.ini
 settings.json
-
-# Large shapefiles (keep structure, ignore data)
-limites/**/*.shp
-limites/**/*.shx
-limites/**/*.dbf
-limites/**/*.prj
-limites/**/*.cpg
-!limites/es_sem_trindade/
-!limites/es/
